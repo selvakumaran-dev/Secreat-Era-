@@ -1,0 +1,286 @@
+import { useState, useEffect, useRef } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import useWebSocket from '../hooks/useWebSocket';
+import WebRTCManager from '../webrtc/webrtcManager';
+import { FileReceiver } from '../webrtc/fileTransfer';
+import { importKey, createEncryptionUtils } from '../crypto/encryption';
+import ConnectionStatus from './ConnectionStatus';
+import ProgressBar from './ProgressBar';
+import FilePreview from './FilePreview';
+
+function ReceivePage() {
+    const { roomId } = useParams();
+    const navigate = useNavigate();
+    const { isConnected, send, on } = useWebSocket();
+
+    const [status, setStatus] = useState('disconnected');
+    const [progress, setProgress] = useState({ progress: 0, speed: 0, transferred: 0, total: 0 });
+    const [receivedFile, setReceivedFile] = useState(null);
+    const [fileMetadata, setFileMetadata] = useState(null);
+
+    const webrtcRef = useRef(null);
+    const fileReceiverRef = useRef(null);
+    const encryptionKeyRef = useRef(null);
+
+    // Join room when component mounts
+    useEffect(() => {
+        if (isConnected && roomId) {
+            send({
+                type: 'join-room',
+                roomId
+            });
+            setStatus('waiting');
+        }
+    }, [isConnected, roomId]);
+
+    // Handle WebSocket messages
+    useEffect(() => {
+        if (!on) return;
+
+        const unsubscribers = [];
+
+        // Room joined successfully
+        unsubscribers.push(on('room-joined', (message) => {
+            console.log('[ReceivePage] Joined room:', message.roomId);
+            setStatus('waiting');
+        }));
+
+        // WebRTC offer received
+        unsubscribers.push(on('offer', async (message) => {
+            console.log('[ReceivePage] Received offer');
+            setStatus('connecting');
+            await handleOffer(message.offer);
+        }));
+
+        // ICE candidate received
+        unsubscribers.push(on('ice-candidate', async (message) => {
+            if (webrtcRef.current && message.candidate) {
+                await webrtcRef.current.addIceCandidate(message.candidate);
+            }
+        }));
+
+        // Error
+        unsubscribers.push(on('error', (message) => {
+            console.error('[ReceivePage] Error:', message.error);
+            alert(`Error: ${message.error}`);
+            setStatus('failed');
+        }));
+
+        return () => {
+            unsubscribers.forEach(unsub => unsub());
+        };
+    }, [on]);
+
+    // Handle WebRTC offer
+    const handleOffer = async (offer) => {
+        try {
+            // Create file receiver
+            fileReceiverRef.current = new FileReceiver(
+                (progressData) => {
+                    setProgress(progressData);
+                    setStatus('transferring');
+                },
+                async ({ file, metadata }) => {
+                    console.log('[ReceivePage] File received:', metadata.name);
+                    setReceivedFile(file);
+                    setFileMetadata(metadata);
+                    setStatus('complete');
+                }
+            );
+
+            // Create WebRTC manager
+            webrtcRef.current = new WebRTCManager(
+                async (data) => {
+                    // Handle incoming data
+                    if (typeof data === 'string') {
+                        try {
+                            const message = JSON.parse(data);
+
+                            if (message.type === 'metadata') {
+                                console.log('[ReceivePage] Received metadata:', message);
+                                setFileMetadata(message);
+
+                                // Import encryption key
+                                encryptionKeyRef.current = await importKey(message.encryptionKey);
+
+                                // IMPORTANT: Pass metadata to FileReceiver
+                                if (fileReceiverRef.current) {
+                                    fileReceiverRef.current.metadata = message;
+                                    fileReceiverRef.current.startTime = Date.now();
+                                }
+                                return;
+                            }
+                        } catch (error) {
+                            console.error('[ReceivePage] Error parsing message:', error);
+                        }
+                    }
+
+                    // Handle file data (chunks and complete message)
+                    if (fileReceiverRef.current && encryptionKeyRef.current) {
+                        const { decryptChunk } = createEncryptionUtils(encryptionKeyRef.current);
+                        await fileReceiverRef.current.handleData(data, decryptChunk);
+                    } else {
+                        console.warn('[ReceivePage] Received data but FileReceiver or encryption key not ready');
+                    }
+                },
+                (state) => {
+                    console.log('[ReceivePage] Connection state:', state);
+                    if (state === 'connected') {
+                        setStatus('connected');
+                    } else if (state === 'failed') {
+                        setStatus('failed');
+                    }
+                }
+            );
+
+            // Initialize peer connection
+            webrtcRef.current.initializePeerConnection();
+
+            // Set ICE candidate handler
+            webrtcRef.current.setOnIceCandidate((candidate) => {
+                send({
+                    type: 'ice-candidate',
+                    roomId,
+                    candidate
+                });
+            });
+
+            // Set remote description (offer)
+            await webrtcRef.current.setRemoteDescription(offer);
+
+            // Create and send answer
+            const answer = await webrtcRef.current.createAnswer();
+            send({
+                type: 'answer',
+                roomId,
+                answer
+            });
+
+        } catch (error) {
+            console.error('[ReceivePage] Error handling offer:', error);
+            setStatus('failed');
+        }
+    };
+
+    // Download file
+    const downloadFile = () => {
+        if (!receivedFile || !fileMetadata) return;
+
+        const url = URL.createObjectURL(receivedFile);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fileMetadata.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
+    return (
+        <div className="min-h-screen p-6">
+            <div className="max-w-4xl mx-auto">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-8">
+                    <Link to="/" className="flex items-center space-x-2 text-gray-400 hover:text-white transition-colors">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                        </svg>
+                        <span>Back to Home</span>
+                    </Link>
+                    <h1 className="text-2xl font-bold text-gradient">Receive File</h1>
+                </div>
+
+                {/* Connection Status */}
+                <div className="mb-6">
+                    <ConnectionStatus status={status} />
+                </div>
+
+                {/* Room Info */}
+                <div className="card mb-6">
+                    <h3 className="text-lg font-semibold mb-2">Room Code</h3>
+                    <p className="text-3xl font-mono text-gradient">{roomId}</p>
+                    <p className="text-sm text-gray-400 mt-2">
+                        {status === 'waiting' && 'Waiting for sender to connect...'}
+                        {status === 'connecting' && 'Establishing secure connection...'}
+                        {status === 'connected' && 'Connected! Waiting for file...'}
+                    </p>
+                </div>
+
+                {/* File Metadata (before transfer) */}
+                {fileMetadata && status === 'connected' && (
+                    <div className="card mb-6">
+                        <h3 className="text-lg font-semibold mb-4">Incoming File</h3>
+                        <div className="flex items-center space-x-3 p-4 bg-dark-800 rounded-lg">
+                            <svg className="w-10 h-10 text-primary-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                            </svg>
+                            <div>
+                                <p className="font-semibold">{fileMetadata.name}</p>
+                                <p className="text-sm text-gray-400">
+                                    {(fileMetadata.size / 1024 / 1024).toFixed(2)} MB
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Transfer Progress */}
+                {status === 'transferring' && (
+                    <div className="card">
+                        <h3 className="text-lg font-semibold mb-4">Receiving File</h3>
+                        <ProgressBar {...progress} />
+                    </div>
+                )}
+
+                {/* Transfer Complete */}
+                {status === 'complete' && receivedFile && (
+                    <div className="space-y-6">
+                        <div className="card text-center">
+                            <div className="w-16 h-16 bg-green-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                                <svg className="w-8 h-8 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                            </div>
+                            <h3 className="text-2xl font-bold mb-2">Transfer Complete!</h3>
+                            <p className="text-gray-400 mb-6">Your file has been received securely</p>
+                            <div className="flex gap-4 justify-center">
+                                <button onClick={downloadFile} className="btn-primary">
+                                    <div className="flex items-center space-x-2">
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                        </svg>
+                                        <span>Download File</span>
+                                    </div>
+                                </button>
+                                <button onClick={() => navigate('/')} className="btn-secondary">
+                                    Back to Home
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* File Preview */}
+                        <FilePreview file={receivedFile} metadata={fileMetadata} />
+                    </div>
+                )}
+
+                {/* Failed State */}
+                {status === 'failed' && (
+                    <div className="card text-center">
+                        <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto mb-4">
+                            <svg className="w-8 h-8 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </div>
+                        <h3 className="text-2xl font-bold mb-2">Transfer Failed</h3>
+                        <p className="text-gray-400 mb-6">Something went wrong. Please try again.</p>
+                        <button onClick={() => navigate('/')} className="btn-primary">
+                            Back to Home
+                        </button>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+export default ReceivePage;
