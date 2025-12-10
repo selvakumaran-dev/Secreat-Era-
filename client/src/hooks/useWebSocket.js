@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import WebSocketClient from '../utils/wsClient';
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'ws://localhost:3000';
+let BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'ws://localhost:3000';
+
+if (BACKEND_URL.startsWith('http://')) {
+    BACKEND_URL = BACKEND_URL.replace('http://', 'ws://');
+} else if (BACKEND_URL.startsWith('https://')) {
+    BACKEND_URL = BACKEND_URL.replace('https://', 'wss://');
+}
 
 /**
  * Custom hook for WebSocket connection
