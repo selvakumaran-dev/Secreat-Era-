@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import WebSocketClient from '../utils/wsClient';
 
 let BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'ws://localhost:3000';
@@ -54,21 +54,21 @@ function useWebSocket() {
     /**
      * Send a message through WebSocket
      */
-    const send = useCallback((message) => {
+    const send = (message) => {
         if (wsRef.current) {
             wsRef.current.send(message);
         }
-    }, []);
+    };
 
     /**
      * Subscribe to a message type
      */
-    const on = useCallback((messageType, handler) => {
+    const on = (messageType, handler) => {
         if (wsRef.current) {
             return wsRef.current.on(messageType, handler);
         }
         return () => { };
-    }, []);
+    };
 
     return {
         isConnected,
