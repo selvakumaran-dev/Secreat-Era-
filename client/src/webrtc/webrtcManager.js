@@ -33,6 +33,7 @@ class WebRTCManager {
         this.dataChannel = null;
         this.onDataChannelMessage = onDataChannelMessage;
         this.onConnectionStateChange = onConnectionStateChange;
+        this.iceCandidateQueue = [];
     }
 
     /**
@@ -144,6 +145,15 @@ class WebRTCManager {
      */
     async setRemoteDescription(description) {
         await this.peerConnection.setRemoteDescription(new RTCSessionDescription(description));
+        // Process any queued ICE candidates
+        while (this.iceCandidateQueue.length > 0) {
+            const candidate = this.iceCandidateQueue.shift();
+            try {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            } catch (error) {
+                console.error('[WebRTC] Error adding queued ICE candidate:', error);
+            }
+        }
     }
 
     /**
@@ -151,7 +161,11 @@ class WebRTCManager {
      */
     async addIceCandidate(candidate) {
         try {
-            await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            if (this.peerConnection && this.peerConnection.remoteDescription) {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            } else {
+                this.iceCandidateQueue.push(candidate);
+            }
         } catch (error) {
             console.error('[WebRTC] Error adding ICE candidate:', error);
         }
